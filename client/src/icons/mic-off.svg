@@ -1,7 +1,0 @@
-svg
-        Copy
-
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M19 10v2h1.5v2H19v2l-3-3zM12 2a3 3 0 013 3v4.27l-6-6V5a3 3 0 013-3z" />
-    <path d="M3.27 2L2 3.27 5 6.27V5a3 3 0 016 0v6a2.99 2.99 0 01-1.17 2.38L9 13.27V15a3 3 0 01-6 0V9h1.5v6a1.5 1.5 0 003 0v-1.73l-4-4L3.27 2z" />
-</svg>

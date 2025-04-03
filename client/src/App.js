@@ -1,9 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ReactComponent as VideoOnIcon } from './icons/video-on.svg';
-import { ReactComponent as VideoOffIcon } from './icons/video-off.svg';
-import { ReactComponent as MicOnIcon } from './icons/mic-on.svg';
-import { ReactComponent as MicOffIcon } from './icons/mic-off.svg';
-import { ReactComponent as SendIcon } from './icons/send.svg';
+import { VideoOnIcon, VideoOffIcon, MicOnIcon, MicOffIcon, SendIcon } from './components/Icons';
+import { initWebRTC, toggleMedia } from './utils/webrtc';
 import './App.css';
 
 const App = () => {
@@ -19,8 +16,8 @@ const App = () => {
     const [participants, setParticipants] = useState([]);
     const [messages, setMessages] = useState([]);
     const [message, setMessage] = useState('');
-    const [videoEnabled, setVideoEnabled] = useState(false);
-    const [audioEnabled, setAudioEnabled] = useState(false);
+    const [videoEnabled, setVideoEnabled] = useState(true);
+    const [audioEnabled, setAudioEnabled] = useState(true);
     const [availableDevices, setAvailableDevices] = useState({ video: [], audio: [] });
     const [selectedVideoDevice, setSelectedVideoDevice] = useState('');
     const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
@@ -35,20 +32,28 @@ const App = () => {
     const chatRef = useRef(null);
 
     useEffect(() => {
-        // Generate random peer ID
         setPeerId(Math.random().toString(36).substring(2, 10));
 
-        // Get available devices
         navigator.mediaDevices.enumerateDevices()
             .then(devices => {
                 const videoDevices = devices.filter(d => d.kind === 'videoinput');
                 const audioDevices = devices.filter(d => d.kind === 'audioinput');
+
                 setAvailableDevices({
                     video: videoDevices,
                     audio: audioDevices
                 });
-                if (videoDevices.length > 0) setSelectedVideoDevice(videoDevices[0].deviceId);
-                if (audioDevices.length > 0) setSelectedAudioDevice(audioDevices[0].deviceId);
+
+                if (videoDevices.length > 0) {
+                    setSelectedVideoDevice(videoDevices[0].deviceId);
+                }
+                if (audioDevices.length > 0) {
+                    setSelectedAudioDevice(audioDevices[0].deviceId);
+                }
+            })
+            .catch(err => {
+                console.error('Ошибка получения устройств:', err);
+                setError('Не удалось получить список устройств');
             });
     }, []);
 
@@ -57,6 +62,49 @@ const App = () => {
             chatRef.current.scrollTop = chatRef.current.scrollHeight;
         }
     }, [messages]);
+
+    const handleInitWebRTC = async () => {
+        try {
+            await initWebRTC({
+                videoEnabled,
+                audioEnabled,
+                selectedVideoDevice,
+                selectedAudioDevice,
+                setLocalStream,
+                localVideoRef,
+                setError
+            });
+        } catch (err) {
+            console.error('WebRTC error:', err);
+            setError(err.message);
+        }
+    };
+
+    const handleToggleMedia = async (type) => {
+        try {
+            const newState = await toggleMedia({
+                type,
+                enabledState: type === 'video' ? videoEnabled : audioEnabled,
+                allowType: type === 'video' ? allowVideo : allowAudio,
+                isCreator,
+                roomId,
+                peerId,
+                wsRef,
+                localStream,
+                initWebRTC: handleInitWebRTC,
+                setError
+            });
+
+            if (type === 'video') {
+                setVideoEnabled(newState);
+            } else {
+                setAudioEnabled(newState);
+            }
+        } catch (err) {
+            console.error('Toggle media error:', err);
+            setError(err.message);
+        }
+    };
 
     const createRoom = () => {
         if (!roomId || !nickname) {
@@ -78,7 +126,7 @@ const App = () => {
             }).then(response => {
                 setIsCreator(true);
                 setStep('room');
-                initWebRTC();
+                handleInitWebRTC();
             }).catch(err => {
                 setError(err.message);
             });
@@ -109,7 +157,7 @@ const App = () => {
                 setStep('room');
                 setMessages(response.chatHistory || []);
                 setParticipants(response.participants || []);
-                initWebRTC();
+                handleInitWebRTC();
             }).catch(err => {
                 setError(err.message);
             });
@@ -138,79 +186,6 @@ const App = () => {
                 );
             }
         };
-    };
-
-    const initWebRTC = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: videoEnabled && selectedVideoDevice ? { deviceId: selectedVideoDevice } : false,
-                audio: audioEnabled && selectedAudioDevice ? { deviceId: selectedAudioDevice } : false
-            });
-
-            setLocalStream(stream);
-            if (localVideoRef.current) {
-                localVideoRef.current.srcObject = stream;
-            }
-
-            // Here you would normally initialize SFU connection
-            // For simplicity, we're simulating it
-        } catch (err) {
-            console.error('Error getting media:', err);
-        }
-    };
-
-    const toggleMedia = async (type) => {
-        if (type === 'video') {
-            if (!allowVideo && !isCreator) {
-                setError('Video is not allowed in this room');
-                return;
-            }
-
-            setVideoEnabled(!videoEnabled);
-
-            if (wsRef.current) {
-                const jsonRpc = new JsonRpc(wsRef.current);
-                await jsonRpc.call('toggleMedia', {
-                    roomId: roomId,
-                    peerId: peerId,
-                    type: 'video',
-                    enabled: !videoEnabled
-                });
-            }
-
-            if (localStream) {
-                localStream.getVideoTracks().forEach(track => {
-                    track.enabled = !videoEnabled;
-                });
-            } else if (!videoEnabled) {
-                initWebRTC();
-            }
-        } else if (type === 'audio') {
-            if (!allowAudio && !isCreator) {
-                setError('Audio is not allowed in this room');
-                return;
-            }
-
-            setAudioEnabled(!audioEnabled);
-
-            if (wsRef.current) {
-                const jsonRpc = new JsonRpc(wsRef.current);
-                await jsonRpc.call('toggleMedia', {
-                    roomId: roomId,
-                    peerId: peerId,
-                    type: 'audio',
-                    enabled: !audioEnabled
-                });
-            }
-
-            if (localStream) {
-                localStream.getAudioTracks().forEach(track => {
-                    track.enabled = !audioEnabled;
-                });
-            } else if (!audioEnabled) {
-                initWebRTC();
-            }
-        }
     };
 
     const updateRoomSettings = () => {
@@ -251,10 +226,13 @@ const App = () => {
             }).then(() => {
                 if (localStream) {
                     localStream.getTracks().forEach(track => track.stop());
+                    setLocalStream(null);
                 }
                 wsRef.current.close();
                 setStep('createOrJoin');
                 setRemoteStreams({});
+                setParticipants([]);
+                setMessages([]);
             }).catch(err => {
                 setError(err.message);
             });
@@ -349,6 +327,7 @@ const App = () => {
                         <select
                             value={selectedVideoDevice}
                             onChange={(e) => setSelectedVideoDevice(e.target.value)}
+                            disabled={availableDevices.video.length === 0}
                         >
                             {availableDevices.video.map(device => (
                                 <option key={device.deviceId} value={device.deviceId}>
@@ -362,6 +341,7 @@ const App = () => {
                         <select
                             value={selectedAudioDevice}
                             onChange={(e) => setSelectedAudioDevice(e.target.value)}
+                            disabled={availableDevices.audio.length === 0}
                         >
                             {availableDevices.audio.map(device => (
                                 <option key={device.deviceId} value={device.deviceId}>
@@ -394,14 +374,16 @@ const App = () => {
                                     <span>{nickname} {isCreator && '(Creator)'}</span>
                                     <div className="media-controls">
                                         <button
-                                            onClick={() => toggleMedia('video')}
+                                            onClick={() => handleToggleMedia('video')}
                                             className={`media-btn ${videoEnabled ? 'active' : ''}`}
+                                            disabled={!allowVideo && !isCreator}
                                         >
                                             {videoEnabled ? <VideoOnIcon /> : <VideoOffIcon />}
                                         </button>
                                         <button
-                                            onClick={() => toggleMedia('audio')}
+                                            onClick={() => handleToggleMedia('audio')}
                                             className={`media-btn ${audioEnabled ? 'active' : ''}`}
+                                            disabled={!allowAudio && !isCreator}
                                         >
                                             {audioEnabled ? <MicOnIcon /> : <MicOffIcon />}
                                         </button>
@@ -498,7 +480,6 @@ const App = () => {
     );
 };
 
-// Simple JSON-RPC client
 class JsonRpc {
     constructor(ws) {
         this.ws = ws;
