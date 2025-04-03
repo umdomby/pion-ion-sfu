@@ -97,7 +97,12 @@ const App = () => {
             return;
         }
 
-        wsRef.current = new WebSocket(`ws://${window.location.hostname}:8080/ws`);
+        // Автоматическое определение протокола (wss для https, ws для http)
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+
+        wsRef.current = new WebSocket(wsUrl);
+
         wsRef.current.onopen = () => {
             const request = {
                 jsonrpc: '2.0',
@@ -114,47 +119,50 @@ const App = () => {
             };
 
             wsRef.current.send(JSON.stringify(request));
+        };
 
-            wsRef.current.onmessage = (event) => {
-                const data = JSON.parse(event.data);
+        wsRef.current.onmessage = (event) => {
+            const data = JSON.parse(event.data);
 
-                if (data.id === 1) {
-                    // Room created response
-                    setIsCreator(true);
-                    setStep('room');
-                    initWebRTC();
-                } else if (data.method === 'newParticipant') {
-                    // New participant joined
-                    setParticipants(prev => [...prev, data.params]);
-                    createPeer(data.params.peerId, false);
-                } else if (data.method === 'participantLeft') {
-                    // Participant left
-                    setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
-                    removePeer(data.params.peerId);
-                } else if (data.method === 'newMessage') {
-                    // New chat message
-                    setMessages(prev => [...prev, data.params]);
-                } else if (data.method === 'roomSettingsUpdated') {
-                    // Room settings changed
-                    setAllowVideo(data.params.allowVideo);
-                    setAllowAudio(data.params.allowAudio);
-                } else if (data.method === 'mediaChanged') {
-                    // Participant media changed
-                    setParticipants(prev =>
-                        prev.map(p =>
-                            p.peerId === data.params.peerId
-                                ? { ...p, [data.params.type]: data.params.enabled }
-                                : p
-                        )
-                    );
-                } else if (data.method === 'signal') {
-                    // WebRTC signal received
-                    const peer = peersRef.current[data.params.PeerID];
-                    if (peer) {
-                        peer.signal(data.params.Payload);
-                    }
+            if (data.id === 1) {
+                // Room created response
+                setIsCreator(true);
+                setStep('room');
+                initWebRTC();
+            } else if (data.method === 'newParticipant') {
+                setParticipants(prev => [...prev, data.params]);
+                createPeer(data.params.peerId, false);
+            } else if (data.method === 'participantLeft') {
+                setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
+                removePeer(data.params.peerId);
+            } else if (data.method === 'newMessage') {
+                setMessages(prev => [...prev, data.params]);
+            } else if (data.method === 'roomSettingsUpdated') {
+                setAllowVideo(data.params.allowVideo);
+                setAllowAudio(data.params.allowAudio);
+            } else if (data.method === 'mediaChanged') {
+                setParticipants(prev =>
+                    prev.map(p =>
+                        p.peerId === data.params.peerId
+                            ? { ...p, [data.params.type]: data.params.enabled }
+                            : p
+                    )
+                );
+            } else if (data.method === 'signal') {
+                const peer = peersRef.current[data.params.PeerID];
+                if (peer) {
+                    peer.signal(data.params.Payload);
                 }
-            };
+            }
+        };
+
+        wsRef.current.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            setError('Connection error. Please try again.');
+        };
+
+        wsRef.current.onclose = () => {
+            console.log('WebSocket connection closed');
         };
     };
 
@@ -164,7 +172,11 @@ const App = () => {
             return;
         }
 
-        wsRef.current = new WebSocket(`ws://${window.location.hostname}:8080/ws`);
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+
+        wsRef.current = new WebSocket(wsUrl);
+
         wsRef.current.onopen = () => {
             const request = {
                 jsonrpc: '2.0',
@@ -181,56 +193,59 @@ const App = () => {
             };
 
             wsRef.current.send(JSON.stringify(request));
+        };
 
-            wsRef.current.onmessage = (event) => {
-                const data = JSON.parse(event.data);
+        wsRef.current.onmessage = (event) => {
+            const data = JSON.parse(event.data);
 
-                if (data.id === 1) {
-                    // Join room response
-                    setAllowVideo(data.result.allowVideo);
-                    setAllowAudio(data.result.allowAudio);
-                    setFullControl(data.result.fullControl);
-                    setStep('room');
-                    setMessages(data.result.chatHistory || []);
-                    setParticipants(data.result.participants || []);
-                    initWebRTC();
+            if (data.id === 1) {
+                // Join room response
+                setAllowVideo(data.result.allowVideo);
+                setAllowAudio(data.result.allowAudio);
+                setFullControl(data.result.fullControl);
+                setStep('room');
+                setMessages(data.result.chatHistory || []);
+                setParticipants(data.result.participants || []);
+                initWebRTC();
 
-                    // Create peers for existing participants
-                    data.result.participants.forEach(participant => {
-                        createPeer(participant.peerId, true);
-                    });
-                } else if (data.method === 'newParticipant') {
-                    // New participant joined
-                    setParticipants(prev => [...prev, data.params]);
-                    createPeer(data.params.peerId, false);
-                } else if (data.method === 'participantLeft') {
-                    // Participant left
-                    setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
-                    removePeer(data.params.peerId);
-                } else if (data.method === 'newMessage') {
-                    // New chat message
-                    setMessages(prev => [...prev, data.params]);
-                } else if (data.method === 'roomSettingsUpdated') {
-                    // Room settings changed
-                    setAllowVideo(data.params.allowVideo);
-                    setAllowAudio(data.params.allowAudio);
-                } else if (data.method === 'mediaChanged') {
-                    // Participant media changed
-                    setParticipants(prev =>
-                        prev.map(p =>
-                            p.peerId === data.params.peerId
-                                ? { ...p, [data.params.type]: data.params.enabled }
-                                : p
-                        )
-                    );
-                } else if (data.method === 'signal') {
-                    // WebRTC signal received
-                    const peer = peersRef.current[data.params.PeerID];
-                    if (peer) {
-                        peer.signal(data.params.Payload);
-                    }
+                // Create peers for existing participants
+                data.result.participants.forEach(participant => {
+                    createPeer(participant.peerId, true);
+                });
+            } else if (data.method === 'newParticipant') {
+                setParticipants(prev => [...prev, data.params]);
+                createPeer(data.params.peerId, false);
+            } else if (data.method === 'participantLeft') {
+                setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
+                removePeer(data.params.peerId);
+            } else if (data.method === 'newMessage') {
+                setMessages(prev => [...prev, data.params]);
+            } else if (data.method === 'roomSettingsUpdated') {
+                setAllowVideo(data.params.allowVideo);
+                setAllowAudio(data.params.allowAudio);
+            } else if (data.method === 'mediaChanged') {
+                setParticipants(prev =>
+                    prev.map(p =>
+                        p.peerId === data.params.peerId
+                            ? { ...p, [data.params.type]: data.params.enabled }
+                            : p
+                    )
+                );
+            } else if (data.method === 'signal') {
+                const peer = peersRef.current[data.params.PeerID];
+                if (peer) {
+                    peer.signal(data.params.Payload);
                 }
-            };
+            }
+        };
+
+        wsRef.current.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            setError('Connection error. Please try again.');
+        };
+
+        wsRef.current.onclose = () => {
+            console.log('WebSocket connection closed');
         };
     };
 
