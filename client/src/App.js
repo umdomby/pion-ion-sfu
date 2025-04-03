@@ -64,7 +64,7 @@ const App = () => {
             return;
         }
 
-        wsRef.current = new WebSocket(`ws://${window.location.hostname}:8080/ws`);
+        wsRef.current = new WebSocket(`ws://localhost:8080/ws`);
         wsRef.current.onopen = () => {
             const jsonRpc = new JsonRpc(wsRef.current);
 
