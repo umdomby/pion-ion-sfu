@@ -68,8 +68,16 @@ const App = () => {
     const initWebRTC = async () => {
         try {
             const constraints = {
-                video: videoEnabled ? { deviceId: selectedVideoDevice } : false,
-                audio: audioEnabled ? { deviceId: selectedAudioDevice } : false
+                video: videoEnabled ? {
+                    deviceId: selectedVideoDevice,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                } : false,
+                audio: audioEnabled ? {
+                    deviceId: selectedAudioDevice,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                } : false
             };
 
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -79,10 +87,14 @@ const App = () => {
                 localVideoRef.current.srcObject = stream;
             }
 
-            // Update all existing peers with the new stream
-            Object.values(peersRef.current).forEach(peer => {
-                if (stream) {
-                    peer.addStream(stream);
+            // Обновляем все существующие пиры с новым потоком
+            Object.entries(peersRef.current).forEach(([peerId, peer]) => {
+                peer.removeStream(stream);
+                peer.addStream(stream);
+
+                // Отправляем новый offer если мы инициатор
+                if (peer.initiator) {
+                    peer.signal(peer._lastOffer || peer._offer);
                 }
             });
         } catch (err) {
@@ -255,24 +267,39 @@ const App = () => {
         const peer = new SimplePeer({
             initiator,
             trickle: true,
-            stream: localStream
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:global.stun.twilio.com:3478?transport=udp' }
+                ]
+            }
         });
 
+        // Добавляем локальный поток если он есть
+        if (localStream) {
+            peer.addStream(localStream);
+        }
+
         peer.on('signal', data => {
-            // Send the signaling data to the other peer via the server
+            // Сохраняем последний offer для возможного переподключения
+            if (data.type === 'offer') {
+                peer._lastOffer = JSON.stringify(data);
+            }
+
             wsRef.current.send(JSON.stringify({
                 jsonrpc: '2.0',
                 method: 'signal',
                 params: {
-                    PeerID: targetPeerId,
-                    Type: 'signal',
-                    Payload: JSON.stringify(data)
+                    roomId: roomId,
+                    senderId: peerId,
+                    targetId: targetPeerId,
+                    signal: JSON.stringify(data)
                 }
             }));
         });
 
         peer.on('stream', stream => {
-            // Got remote video stream
+            // Получаем удаленный видеопоток
             setRemoteStreams(prev => ({
                 ...prev,
                 [targetPeerId]: stream
@@ -289,6 +316,19 @@ const App = () => {
         });
 
         peersRef.current[targetPeerId] = peer;
+    };
+
+    const switchDevice = async (type, deviceId) => {
+        if (type === 'video') {
+            setSelectedVideoDevice(deviceId);
+        } else {
+            setSelectedAudioDevice(deviceId);
+        }
+
+        // Если медиа уже включено, переинициализируем с новым устройством
+        if ((type === 'video' && videoEnabled) || (type === 'audio' && audioEnabled)) {
+            await initWebRTC();
+        }
     };
 
     const removePeer = (peerId) => {
@@ -341,7 +381,7 @@ const App = () => {
         const currentState = type === 'video' ? videoEnabled : audioEnabled;
         const newState = !currentState;
 
-        // Check permissions if not creator
+        // Для создателя комнаты всегда разрешено
         if (!isCreator) {
             if (type === 'video' && !allowVideo) {
                 setError('Video is not allowed in this room');
@@ -353,14 +393,14 @@ const App = () => {
             }
         }
 
-        // Update state
+        // Обновляем состояние
         if (type === 'video') {
             setVideoEnabled(newState);
         } else {
             setAudioEnabled(newState);
         }
 
-        // Send update to server
+        // Отправляем обновление на сервер
         wsRef.current.send(JSON.stringify({
             jsonrpc: '2.0',
             id: 4,
@@ -373,16 +413,8 @@ const App = () => {
             }
         }));
 
-        // Reinitialize media if enabling
-        if (newState) {
-            await initWebRTC();
-        } else if (localStream) {
-            // Disable the tracks if disabling
-            const tracks = type === 'video'
-                ? localStream.getVideoTracks()
-                : localStream.getAudioTracks();
-            tracks.forEach(track => track.enabled = false);
-        }
+        // Переинициализируем медиа
+        await initWebRTC();
     };
 
     const leaveRoom = () => {
@@ -544,14 +576,14 @@ const App = () => {
                                             className={`media-btn ${videoEnabled ? 'active' : ''}`}
                                             disabled={!allowVideo && !isCreator}
                                         >
-                                            {videoEnabled ? <VideoOnIcon /> : <VideoOffIcon />}
+                                            {videoEnabled ? <VideoOnIcon/> : <VideoOffIcon/>}
                                         </button>
                                         <button
                                             onClick={() => toggleMedia('audio')}
                                             className={`media-btn ${audioEnabled ? 'active' : ''}`}
                                             disabled={!allowAudio && !isCreator}
                                         >
-                                            {audioEnabled ? <MicOnIcon /> : <MicOffIcon />}
+                                            {audioEnabled ? <MicOnIcon/> : <MicOffIcon/>}
                                         </button>
                                     </div>
                                 </div>
@@ -572,8 +604,10 @@ const App = () => {
                                     <div className="video-info">
                                         <span>{participant.nickname} {participant.isCreator && '(Creator)'}</span>
                                         <div className="media-status">
-                                            {participant.video ? <VideoOnIcon className="status-icon" /> : <VideoOffIcon className="status-icon" />}
-                                            {participant.audio ? <MicOnIcon className="status-icon" /> : <MicOffIcon className="status-icon" />}
+                                            {participant.video ? <VideoOnIcon className="status-icon"/> :
+                                                <VideoOffIcon className="status-icon"/>}
+                                            {participant.audio ? <MicOnIcon className="status-icon"/> :
+                                                <MicOffIcon className="status-icon"/>}
                                         </div>
                                     </div>
                                 </div>
@@ -638,7 +672,7 @@ const App = () => {
                                     placeholder="Type a message..."
                                     onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                                 />
-                                <button onClick={sendMessage}><SendIcon /></button>
+                                <button onClick={sendMessage}><SendIcon/></button>
                             </div>
                         </div>
 
@@ -646,6 +680,35 @@ const App = () => {
                     </div>
                 </div>
             )}
+
+            <div className="form-group">
+                <label>Video Device</label>
+                <select
+                    value={selectedVideoDevice}
+                    onChange={(e) => switchDevice('video', e.target.value)}
+                    disabled={availableDevices.video.length === 0}
+                >
+                    {availableDevices.video.map(device => (
+                        <option key={device.deviceId} value={device.deviceId}>
+                            {device.label || `Camera ${availableDevices.video.indexOf(device) + 1}`}
+                        </option>
+                    ))}
+                </select>
+            </div>
+            <div className="form-group">
+                <label>Audio Device</label>
+                <select
+                    value={selectedAudioDevice}
+                    onChange={(e) => switchDevice('audio', e.target.value)}
+                    disabled={availableDevices.audio.length === 0}
+                >
+                    {availableDevices.audio.map(device => (
+                        <option key={device.deviceId} value={device.deviceId}>
+                            {device.label || `Microphone ${availableDevices.audio.indexOf(device) + 1}`}
+                        </option>
+                    ))}
+                </select>
+            </div>
         </div>
     );
 };

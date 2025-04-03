@@ -387,32 +387,40 @@ func (s *Server) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.
 
 		conn.Reply(ctx, req.ID, "Left room")
 
-	case "signal":
-		var params WebRTCSignal
-		if err := json.Unmarshal(*req.Params, &params); err != nil {
-			conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32602, Message: "Invalid params"})
-			return
-		}
+// В обработчике сигналов изменим логику
+case "signal":
+    var params struct {
+        RoomID   string `json:"roomId"`
+        SenderID string `json:"senderId"`
+        TargetID string `json:"targetId"`
+        Signal   string `json:"signal"`
+    }
+    if err := json.Unmarshal(*req.Params, &params); err != nil {
+        conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32602, Message: "Invalid params"})
+        return
+    }
 
-		s.mu.RLock()
-		room, exists := s.rooms[params.PeerID[:8]] // First 8 chars are room ID
-		s.mu.RUnlock()
+    s.mu.RLock()
+    room, exists := s.rooms[params.RoomID]
+    s.mu.RUnlock()
 
-		if !exists {
-			conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32000, Message: "Room does not exist"})
-			return
-		}
+    if !exists {
+        conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32000, Message: "Room does not exist"})
+        return
+    }
 
-		// Forward the signal to the target peer
-		room.mu.RLock()
-		target, exists := room.Participants[params.PeerID]
-		room.mu.RUnlock()
+    room.mu.RLock()
+    target, exists := room.Participants[params.TargetID]
+    room.mu.RUnlock()
 
-		if exists {
-			target.Session.Notify(ctx, "signal", params)
-		}
+    if exists {
+        target.Session.Notify(ctx, "signal", map[string]interface{}{
+            "senderId": params.SenderID,
+            "signal":   params.Signal,
+        })
+    }
 
-		conn.Reply(ctx, req.ID, "Signal forwarded")
+    conn.Reply(ctx, req.ID, "Signal forwarded")
 
 	default:
 		conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32601, Message: "Method not found"})
