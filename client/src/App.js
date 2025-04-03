@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { VideoOnIcon, VideoOffIcon, MicOnIcon, MicOffIcon, SendIcon } from './components/Icons';
-import { initWebRTC, toggleMedia } from './utils/webrtc';
+import SimplePeer from 'simple-peer';
 import './App.css';
 
 const App = () => {
@@ -16,8 +16,8 @@ const App = () => {
     const [participants, setParticipants] = useState([]);
     const [messages, setMessages] = useState([]);
     const [message, setMessage] = useState('');
-    const [videoEnabled, setVideoEnabled] = useState(true);
-    const [audioEnabled, setAudioEnabled] = useState(true);
+    const [videoEnabled, setVideoEnabled] = useState(false);
+    const [audioEnabled, setAudioEnabled] = useState(false);
     const [availableDevices, setAvailableDevices] = useState({ video: [], audio: [] });
     const [selectedVideoDevice, setSelectedVideoDevice] = useState('');
     const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
@@ -28,12 +28,14 @@ const App = () => {
     const localVideoRef = useRef(null);
     const remoteVideosRef = useRef({});
     const wsRef = useRef(null);
-    const pcRefs = useRef({});
+    const peersRef = useRef({});
     const chatRef = useRef(null);
 
     useEffect(() => {
+        // Generate a random peer ID
         setPeerId(Math.random().toString(36).substring(2, 10));
 
+        // Get available media devices
         navigator.mediaDevices.enumerateDevices()
             .then(devices => {
                 const videoDevices = devices.filter(d => d.kind === 'videoinput');
@@ -52,8 +54,8 @@ const App = () => {
                 }
             })
             .catch(err => {
-                console.error('Ошибка получения устройств:', err);
-                setError('Не удалось получить список устройств');
+                console.error('Error getting devices:', err);
+                setError('Failed to get device list');
             });
     }, []);
 
@@ -63,45 +65,28 @@ const App = () => {
         }
     }, [messages]);
 
-    const handleInitWebRTC = async () => {
+    const initWebRTC = async () => {
         try {
-            await initWebRTC({
-                videoEnabled,
-                audioEnabled,
-                selectedVideoDevice,
-                selectedAudioDevice,
-                setLocalStream,
-                localVideoRef,
-                setError
+            const constraints = {
+                video: videoEnabled ? { deviceId: selectedVideoDevice } : false,
+                audio: audioEnabled ? { deviceId: selectedAudioDevice } : false
+            };
+
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            setLocalStream(stream);
+
+            if (localVideoRef.current) {
+                localVideoRef.current.srcObject = stream;
+            }
+
+            // Update all existing peers with the new stream
+            Object.values(peersRef.current).forEach(peer => {
+                if (stream) {
+                    peer.addStream(stream);
+                }
             });
         } catch (err) {
             console.error('WebRTC error:', err);
-            setError(err.message);
-        }
-    };
-
-    const handleToggleMedia = async (type) => {
-        try {
-            const newState = await toggleMedia({
-                type,
-                enabledState: type === 'video' ? videoEnabled : audioEnabled,
-                allowType: type === 'video' ? allowVideo : allowAudio,
-                isCreator,
-                roomId,
-                peerId,
-                wsRef,
-                localStream,
-                initWebRTC: handleInitWebRTC,
-                setError
-            });
-
-            if (type === 'video') {
-                setVideoEnabled(newState);
-            } else {
-                setAudioEnabled(newState);
-            }
-        } catch (err) {
-            console.error('Toggle media error:', err);
             setError(err.message);
         }
     };
@@ -112,24 +97,64 @@ const App = () => {
             return;
         }
 
-        wsRef.current = new WebSocket(`ws://localhost:8080/ws`);
+        wsRef.current = new WebSocket(`ws://${window.location.hostname}:8080/ws`);
         wsRef.current.onopen = () => {
-            const jsonRpc = new JsonRpc(wsRef.current);
+            const request = {
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'createRoom',
+                params: {
+                    roomId: roomId,
+                    password: password,
+                    nickname: nickname,
+                    fullControl: fullControl,
+                    allowVideo: allowVideo,
+                    allowAudio: allowAudio
+                }
+            };
 
-            jsonRpc.call('createRoom', {
-                roomId: roomId,
-                password: password,
-                nickname: nickname,
-                fullControl: fullControl,
-                allowVideo: allowVideo,
-                allowAudio: allowAudio
-            }).then(response => {
-                setIsCreator(true);
-                setStep('room');
-                handleInitWebRTC();
-            }).catch(err => {
-                setError(err.message);
-            });
+            wsRef.current.send(JSON.stringify(request));
+
+            wsRef.current.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.id === 1) {
+                    // Room created response
+                    setIsCreator(true);
+                    setStep('room');
+                    initWebRTC();
+                } else if (data.method === 'newParticipant') {
+                    // New participant joined
+                    setParticipants(prev => [...prev, data.params]);
+                    createPeer(data.params.peerId, false);
+                } else if (data.method === 'participantLeft') {
+                    // Participant left
+                    setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
+                    removePeer(data.params.peerId);
+                } else if (data.method === 'newMessage') {
+                    // New chat message
+                    setMessages(prev => [...prev, data.params]);
+                } else if (data.method === 'roomSettingsUpdated') {
+                    // Room settings changed
+                    setAllowVideo(data.params.allowVideo);
+                    setAllowAudio(data.params.allowAudio);
+                } else if (data.method === 'mediaChanged') {
+                    // Participant media changed
+                    setParticipants(prev =>
+                        prev.map(p =>
+                            p.peerId === data.params.peerId
+                                ? { ...p, [data.params.type]: data.params.enabled }
+                                : p
+                        )
+                    );
+                } else if (data.method === 'signal') {
+                    // WebRTC signal received
+                    const peer = peersRef.current[data.params.PeerID];
+                    if (peer) {
+                        peer.signal(data.params.Payload);
+                    }
+                }
+            };
         };
     };
 
@@ -141,109 +166,122 @@ const App = () => {
 
         wsRef.current = new WebSocket(`ws://${window.location.hostname}:8080/ws`);
         wsRef.current.onopen = () => {
-            const jsonRpc = new JsonRpc(wsRef.current);
-
-            jsonRpc.call('joinRoom', {
-                roomId: roomId,
-                password: password,
-                nickname: nickname,
-                peerId: peerId,
-                video: videoEnabled,
-                audio: audioEnabled
-            }).then(response => {
-                setAllowVideo(response.allowVideo);
-                setAllowAudio(response.allowAudio);
-                setFullControl(response.fullControl);
-                setStep('room');
-                setMessages(response.chatHistory || []);
-                setParticipants(response.participants || []);
-                handleInitWebRTC();
-            }).catch(err => {
-                setError(err.message);
-            });
-        };
-
-        wsRef.current.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-
-            if (data.method === 'newParticipant') {
-                setParticipants(prev => [...prev, data.params]);
-            } else if (data.method === 'participantLeft') {
-                setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
-                removeRemoteStream(data.params.peerId);
-            } else if (data.method === 'newMessage') {
-                setMessages(prev => [...prev, data.params]);
-            } else if (data.method === 'roomSettingsUpdated') {
-                setAllowVideo(data.params.allowVideo);
-                setAllowAudio(data.params.allowAudio);
-            } else if (data.method === 'mediaChanged') {
-                setParticipants(prev =>
-                    prev.map(p =>
-                        p.peerId === data.params.peerId
-                            ? { ...p, [data.params.type]: data.params.enabled }
-                            : p
-                    )
-                );
-            }
-        };
-    };
-
-    const updateRoomSettings = () => {
-        if (!isCreator) return;
-
-        const jsonRpc = new JsonRpc(wsRef.current);
-        jsonRpc.call('updateSettings', {
-            roomId: roomId,
-            allowVideo: allowVideo,
-            allowAudio: allowAudio
-        }).catch(err => {
-            setError(err.message);
-        });
-    };
-
-    const sendMessage = () => {
-        if (!message.trim()) return;
-
-        const jsonRpc = new JsonRpc(wsRef.current);
-        jsonRpc.call('sendMessage', {
-            roomId: roomId,
-            peerId: peerId,
-            nickname: nickname,
-            message: message
-        }).then(() => {
-            setMessage('');
-        }).catch(err => {
-            setError(err.message);
-        });
-    };
-
-    const leaveRoom = () => {
-        if (wsRef.current) {
-            const jsonRpc = new JsonRpc(wsRef.current);
-            jsonRpc.call('leaveRoom', {
-                roomId: roomId,
-                peerId: peerId
-            }).then(() => {
-                if (localStream) {
-                    localStream.getTracks().forEach(track => track.stop());
-                    setLocalStream(null);
+            const request = {
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'joinRoom',
+                params: {
+                    roomId: roomId,
+                    password: password,
+                    nickname: nickname,
+                    peerId: peerId,
+                    video: videoEnabled,
+                    audio: audioEnabled
                 }
-                wsRef.current.close();
-                setStep('createOrJoin');
-                setRemoteStreams({});
-                setParticipants([]);
-                setMessages([]);
-            }).catch(err => {
-                setError(err.message);
-            });
+            };
+
+            wsRef.current.send(JSON.stringify(request));
+
+            wsRef.current.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.id === 1) {
+                    // Join room response
+                    setAllowVideo(data.result.allowVideo);
+                    setAllowAudio(data.result.allowAudio);
+                    setFullControl(data.result.fullControl);
+                    setStep('room');
+                    setMessages(data.result.chatHistory || []);
+                    setParticipants(data.result.participants || []);
+                    initWebRTC();
+
+                    // Create peers for existing participants
+                    data.result.participants.forEach(participant => {
+                        createPeer(participant.peerId, true);
+                    });
+                } else if (data.method === 'newParticipant') {
+                    // New participant joined
+                    setParticipants(prev => [...prev, data.params]);
+                    createPeer(data.params.peerId, false);
+                } else if (data.method === 'participantLeft') {
+                    // Participant left
+                    setParticipants(prev => prev.filter(p => p.peerId !== data.params.peerId));
+                    removePeer(data.params.peerId);
+                } else if (data.method === 'newMessage') {
+                    // New chat message
+                    setMessages(prev => [...prev, data.params]);
+                } else if (data.method === 'roomSettingsUpdated') {
+                    // Room settings changed
+                    setAllowVideo(data.params.allowVideo);
+                    setAllowAudio(data.params.allowAudio);
+                } else if (data.method === 'mediaChanged') {
+                    // Participant media changed
+                    setParticipants(prev =>
+                        prev.map(p =>
+                            p.peerId === data.params.peerId
+                                ? { ...p, [data.params.type]: data.params.enabled }
+                                : p
+                        )
+                    );
+                } else if (data.method === 'signal') {
+                    // WebRTC signal received
+                    const peer = peersRef.current[data.params.PeerID];
+                    if (peer) {
+                        peer.signal(data.params.Payload);
+                    }
+                }
+            };
+        };
+    };
+
+    const createPeer = (targetPeerId, initiator) => {
+        if (peersRef.current[targetPeerId]) return;
+
+        const peer = new SimplePeer({
+            initiator,
+            trickle: true,
+            stream: localStream
+        });
+
+        peer.on('signal', data => {
+            // Send the signaling data to the other peer via the server
+            wsRef.current.send(JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'signal',
+                params: {
+                    PeerID: targetPeerId,
+                    Type: 'signal',
+                    Payload: JSON.stringify(data)
+                }
+            }));
+        });
+
+        peer.on('stream', stream => {
+            // Got remote video stream
+            setRemoteStreams(prev => ({
+                ...prev,
+                [targetPeerId]: stream
+            }));
+        });
+
+        peer.on('close', () => {
+            removePeer(targetPeerId);
+        });
+
+        peer.on('error', err => {
+            console.error('Peer error:', err);
+            removePeer(targetPeerId);
+        });
+
+        peersRef.current[targetPeerId] = peer;
+    };
+
+    const removePeer = (peerId) => {
+        if (peersRef.current[peerId]) {
+            peersRef.current[peerId].destroy();
+            delete peersRef.current[peerId];
         }
-    };
 
-    const addRemoteStream = (peerId, stream) => {
-        setRemoteStreams(prev => ({ ...prev, [peerId]: stream }));
-    };
-
-    const removeRemoteStream = (peerId) => {
         setRemoteStreams(prev => {
             const newStreams = { ...prev };
             delete newStreams[peerId];
@@ -251,9 +289,122 @@ const App = () => {
         });
     };
 
+    const updateRoomSettings = () => {
+        if (!isCreator) return;
+
+        wsRef.current.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'updateSettings',
+            params: {
+                roomId: roomId,
+                allowVideo: allowVideo,
+                allowAudio: allowAudio
+            }
+        }));
+    };
+
+    const sendMessage = () => {
+        if (!message.trim()) return;
+
+        wsRef.current.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 3,
+            method: 'sendMessage',
+            params: {
+                roomId: roomId,
+                peerId: peerId,
+                nickname: nickname,
+                message: message
+            }
+        }));
+
+        setMessage('');
+    };
+
+    const toggleMedia = async (type) => {
+        const currentState = type === 'video' ? videoEnabled : audioEnabled;
+        const newState = !currentState;
+
+        // Check permissions if not creator
+        if (!isCreator) {
+            if (type === 'video' && !allowVideo) {
+                setError('Video is not allowed in this room');
+                return;
+            }
+            if (type === 'audio' && !allowAudio) {
+                setError('Audio is not allowed in this room');
+                return;
+            }
+        }
+
+        // Update state
+        if (type === 'video') {
+            setVideoEnabled(newState);
+        } else {
+            setAudioEnabled(newState);
+        }
+
+        // Send update to server
+        wsRef.current.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 4,
+            method: 'toggleMedia',
+            params: {
+                roomId: roomId,
+                peerId: peerId,
+                type: type,
+                enabled: newState
+            }
+        }));
+
+        // Reinitialize media if enabling
+        if (newState) {
+            await initWebRTC();
+        } else if (localStream) {
+            // Disable the tracks if disabling
+            const tracks = type === 'video'
+                ? localStream.getVideoTracks()
+                : localStream.getAudioTracks();
+            tracks.forEach(track => track.enabled = false);
+        }
+    };
+
+    const leaveRoom = () => {
+        if (wsRef.current) {
+            wsRef.current.send(JSON.stringify({
+                jsonrpc: '2.0',
+                id: 5,
+                method: 'leaveRoom',
+                params: {
+                    roomId: roomId,
+                    peerId: peerId
+                }
+            }));
+
+            // Clean up
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                setLocalStream(null);
+            }
+
+            Object.keys(peersRef.current).forEach(peerId => {
+                removePeer(peerId);
+            });
+
+            wsRef.current.close();
+            setStep('createOrJoin');
+            setRemoteStreams({});
+            setParticipants([]);
+            setMessages([]);
+        }
+    };
+
     const formatTime = (dateString) => {
-        const date = new Date(dateString);
-        return date.toLocaleTimeString();
+        if (typeof dateString === 'string') {
+            return new Date(dateString).toLocaleTimeString();
+        }
+        return dateString.toLocaleTimeString();
     };
 
     return (
@@ -374,14 +525,14 @@ const App = () => {
                                     <span>{nickname} {isCreator && '(Creator)'}</span>
                                     <div className="media-controls">
                                         <button
-                                            onClick={() => handleToggleMedia('video')}
+                                            onClick={() => toggleMedia('video')}
                                             className={`media-btn ${videoEnabled ? 'active' : ''}`}
                                             disabled={!allowVideo && !isCreator}
                                         >
                                             {videoEnabled ? <VideoOnIcon /> : <VideoOffIcon />}
                                         </button>
                                         <button
-                                            onClick={() => handleToggleMedia('audio')}
+                                            onClick={() => toggleMedia('audio')}
                                             className={`media-btn ${audioEnabled ? 'active' : ''}`}
                                             disabled={!allowAudio && !isCreator}
                                         >
@@ -394,7 +545,11 @@ const App = () => {
                             {participants.map(participant => (
                                 <div key={participant.peerId} className="video-item remote">
                                     <video
-                                        ref={el => remoteVideosRef.current[participant.peerId] = el}
+                                        ref={el => {
+                                            if (el && remoteStreams[participant.peerId]) {
+                                                el.srcObject = remoteStreams[participant.peerId];
+                                            }
+                                        }}
                                         autoPlay
                                         playsInline
                                         className={participant.video ? '' : 'disabled'}
@@ -479,48 +634,5 @@ const App = () => {
         </div>
     );
 };
-
-class JsonRpc {
-    constructor(ws) {
-        this.ws = ws;
-        this.id = 0;
-        this.promises = {};
-
-        this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-
-            if (data.id && this.promises[data.id]) {
-                if (data.error) {
-                    this.promises[data.id].reject(data.error);
-                } else {
-                    this.promises[data.id].resolve(data.result);
-                }
-                delete this.promises[data.id];
-            }
-        };
-    }
-
-    call(method, params) {
-        return new Promise((resolve, reject) => {
-            const id = ++this.id;
-            this.promises[id] = { resolve, reject };
-
-            this.ws.send(JSON.stringify({
-                jsonrpc: '2.0',
-                id,
-                method,
-                params
-            }));
-        });
-    }
-
-    notify(method, params) {
-        this.ws.send(JSON.stringify({
-            jsonrpc: '2.0',
-            method,
-            params
-        }));
-    }
-}
 
 export default App;

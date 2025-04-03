@@ -11,7 +11,9 @@
     "react-dom": "^19.1.0",
     "react-media-recorder": "^1.7.1",
     "react-scripts": "5.0.1",
-    "web-vitals": "^2.1.4"
+    "simple-peer": "^9.11.1",
+    "web-vitals": "^2.1.4",
+    "webrtc-adapter": "^9.0.1"
   },
   "scripts": {
     "start": "react-scripts start",

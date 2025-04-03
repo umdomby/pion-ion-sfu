@@ -5,28 +5,61 @@ export const initWebRTC = async ({
                                      selectedAudioDevice,
                                      setLocalStream,
                                      localVideoRef,
-                                     setError
+                                     setError,
+                                     setAvailableDevices,
+                                     setSelectedVideoDevice,
+                                     setSelectedAudioDevice
                                  }) => {
     try {
-        const shouldRequestVideo = videoEnabled && selectedVideoDevice;
-        const shouldRequestAudio = audioEnabled && selectedAudioDevice;
+        // Сначала запросим доступ к устройствам без ограничений, чтобы получить список
+        const allDevices = await navigator.mediaDevices.enumerateDevices();
 
-        if (!shouldRequestVideo && !shouldRequestAudio) {
-            throw new Error('Должно быть включено хотя бы одно устройство');
-        }
+        const videoDevices = allDevices.filter(d => d.kind === 'videoinput');
+        const audioDevices = allDevices.filter(d => d.kind === 'audioinput');
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: shouldRequestVideo ? { deviceId: selectedVideoDevice } : false,
-            audio: shouldRequestAudio ? { deviceId: selectedAudioDevice } : true
+        setAvailableDevices({
+            video: videoDevices,
+            audio: audioDevices
         });
+
+        // Установим дефолтные устройства, если они не выбраны
+        const videoDeviceId = selectedVideoDevice || (videoDevices[0]?.deviceId || null);
+        const audioDeviceId = selectedAudioDevice || (audioDevices[0]?.deviceId || null);
+
+        if (videoDeviceId) setSelectedVideoDevice(videoDeviceId);
+        if (audioDeviceId) setSelectedAudioDevice(audioDeviceId);
+
+        // Теперь запросим медиапоток с выбранными устройствами
+        const constraints = {
+            video: videoEnabled ? {
+                deviceId: videoDeviceId ? { exact: videoDeviceId } : true
+            } : false,
+            audio: audioEnabled ? {
+                deviceId: audioDeviceId ? { exact: audioDeviceId } : true
+            } : false
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
         setLocalStream(stream);
         if (localVideoRef.current) {
             localVideoRef.current.srcObject = stream;
         }
+
+        // Обновим список устройств после получения доступа (чтобы получить названия)
+        const updatedDevices = await navigator.mediaDevices.enumerateDevices();
+        const updatedVideoDevices = updatedDevices.filter(d => d.kind === 'videoinput');
+        const updatedAudioDevices = updatedDevices.filter(d => d.kind === 'audioinput');
+
+        setAvailableDevices({
+            video: updatedVideoDevices,
+            audio: updatedAudioDevices
+        });
+
     } catch (err) {
         console.error('Ошибка доступа к медиаустройствам:', err);
         setError('Ошибка доступа к камере/микрофону. Проверьте разрешения.');
+        throw err;
     }
 };
 
@@ -40,7 +73,9 @@ export const toggleMedia = async ({
                                       wsRef,
                                       localStream,
                                       initWebRTC,
-                                      setError
+                                      setError,
+                                      selectedVideoDevice,
+                                      selectedAudioDevice
                                   }) => {
     if (!allowType && !isCreator) {
         setError(`${type === 'video' ? 'Видео' : 'Аудио'} запрещено в этой комнате`);
@@ -63,7 +98,13 @@ export const toggleMedia = async ({
         const tracks = type === 'video'
             ? localStream.getVideoTracks()
             : localStream.getAudioTracks();
-        tracks.forEach(track => (track.enabled = newState));
+
+        if (tracks.length > 0) {
+            tracks.forEach(track => (track.enabled = newState));
+        } else if (newState) {
+            // Если треков нет (например, устройство было отключено), переинициализируем
+            await initWebRTC();
+        }
     } else if (newState) {
         await initWebRTC();
     }
@@ -78,14 +119,18 @@ class JsonRpc {
         this.promises = {};
 
         this.ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.id && this.promises[data.id]) {
-                if (data.error) {
-                    this.promises[data.id].reject(data.error);
-                } else {
-                    this.promises[data.id].resolve(data.result);
+            try {
+                const data = JSON.parse(event.data);
+                if (data.id && this.promises[data.id]) {
+                    if (data.error) {
+                        this.promises[data.id].reject(data.error);
+                    } else {
+                        this.promises[data.id].resolve(data.result);
+                    }
+                    delete this.promises[data.id];
                 }
-                delete this.promises[data.id];
+            } catch (err) {
+                console.error('Error parsing JSON-RPC message:', err);
             }
         };
     }

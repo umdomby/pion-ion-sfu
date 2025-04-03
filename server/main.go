@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/pion/ion-sfu/pkg/sfu"
+	"github.com/pion/webrtc/v3"
 	"github.com/sourcegraph/jsonrpc2"
 	websocketjsonrpc2 "github.com/sourcegraph/jsonrpc2/websocket"
 )
@@ -63,18 +63,20 @@ type RoomSettings struct {
 	AllowAudio bool   `json:"allowAudio"`
 }
 
+type WebRTCSignal struct {
+	PeerID  string `json:"peerId"`
+	Type    string `json:"type"`
+	Payload string `json:"payload"`
+}
+
 type Server struct {
 	rooms map[string]*Room
-	sfu   *sfu.SFU
 	mu    sync.RWMutex
 }
 
 func NewServer() *Server {
-	config := sfu.Config{}
-	sfu := sfu.NewSFU(config)
 	return &Server{
 		rooms: make(map[string]*Room),
-		sfu:   sfu,
 	}
 }
 
@@ -385,6 +387,33 @@ func (s *Server) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.
 
 		conn.Reply(ctx, req.ID, "Left room")
 
+	case "signal":
+		var params WebRTCSignal
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32602, Message: "Invalid params"})
+			return
+		}
+
+		s.mu.RLock()
+		room, exists := s.rooms[params.PeerID[:8]] // First 8 chars are room ID
+		s.mu.RUnlock()
+
+		if !exists {
+			conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32000, Message: "Room does not exist"})
+			return
+		}
+
+		// Forward the signal to the target peer
+		room.mu.RLock()
+		target, exists := room.Participants[params.PeerID]
+		room.mu.RUnlock()
+
+		if exists {
+			target.Session.Notify(ctx, "signal", params)
+		}
+
+		conn.Reply(ctx, req.ID, "Signal forwarded")
+
 	default:
 		conn.ReplyWithError(ctx, req.ID, &jsonrpc2.Error{Code: -32601, Message: "Method not found"})
 	}
@@ -392,6 +421,18 @@ func (s *Server) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.
 
 func main() {
 	server := NewServer()
+
+	// Configure WebRTC settings
+	webrtcCfg := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
+	}
+
+	// This would be used in your WebRTC signaling logic
+	_ = webrtcCfg
 
 	http.HandleFunc("/ws", server.handleWebSocket)
 	http.Handle("/", http.FileServer(http.Dir("./public")))
